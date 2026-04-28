@@ -1,0 +1,85 @@
+name: Audit Formulas and Casks
+
+on:
+  pull_request:
+    paths:
+      - "Formula/*.rb"
+      - "Casks/*.rb"
+  push:
+    branches: [main]
+    paths:
+      - "Formula/*.rb"
+      - "Casks/*.rb"
+
+jobs:
+  audit-formulas:
+    name: Audit changed formulas
+    runs-on: macos-latest
+    steps:
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Tap locally
+        run: |
+          mkdir -p "$(brew --repository)/Library/Taps/asymmetric-effort"
+          ln -s "$GITHUB_WORKSPACE" "$(brew --repository)/Library/Taps/asymmetric-effort/homebrew-tap"
+
+      - name: Get changed formula files
+        id: changed-formulas
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            files=$(gh pr diff ${{ github.event.pull_request.number }} --name-only | grep '^Formula/' || true)
+          else
+            files=$(git diff --name-only HEAD~1 | grep '^Formula/' || true)
+          fi
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Audit formulas
+        if: steps.changed-formulas.outputs.files != ''
+        run: |
+          for f in ${{ steps.changed-formulas.outputs.files }}; do
+            echo "::group::Auditing $f"
+            brew audit --formula "$f"
+            echo "::endgroup::"
+          done
+
+  audit-casks:
+    name: Audit changed casks
+    runs-on: macos-latest
+    steps:
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Tap locally
+        run: |
+          mkdir -p "$(brew --repository)/Library/Taps/asymmetric-effort"
+          ln -s "$GITHUB_WORKSPACE" "$(brew --repository)/Library/Taps/asymmetric-effort/homebrew-tap"
+
+      - name: Get changed cask files
+        id: changed-casks
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            files=$(gh pr diff ${{ github.event.pull_request.number }} --name-only | grep '^Casks/' || true)
+          else
+            files=$(git diff --name-only HEAD~1 | grep '^Casks/' || true)
+          fi
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Audit casks
+        if: steps.changed-casks.outputs.files != ''
+        run: |
+          for f in ${{ steps.changed-casks.outputs.files }}; do
+            echo "::group::Auditing $f"
+            brew audit --cask "$f"
+            echo "::endgroup::"
+          done
