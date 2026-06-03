@@ -6,9 +6,16 @@ Official [Homebrew](https://brew.sh) tap for software published by [Asymmetric E
 
 ```bash
 brew tap asymmetric-effort/tap
+brew untap asymmetric-effort/tap 2>/dev/null; brew tap asymmetric-effort/tap
 ```
 
-Once tapped, install any available formula:
+Third-party taps must be trusted before formulas can be installed:
+
+```bash
+brew trust asymmetric-effort/tap
+```
+
+Once tapped and trusted, install any available formula:
 
 ```bash
 brew install asymmetric-effort/tap/<formula>
@@ -24,6 +31,7 @@ brew install asymmetric-effort/tap/<formula>
 
 ```bash
 brew tap asymmetric-effort/tap
+brew trust asymmetric-effort/tap
 brew install leakdetector
 leakdetector --version
 ```
@@ -204,6 +212,7 @@ and auto-merged.
 
 ```bash
 brew tap asymmetric-effort/tap
+brew trust asymmetric-effort/tap
 brew install myproject
 ```
 
