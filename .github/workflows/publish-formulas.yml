@@ -1,0 +1,217 @@
+name: Publish Formulas
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # Daily at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for new releases and publish formulas
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          REGISTRY="formula-sources.json"
+          if [ ! -f "$REGISTRY" ]; then
+            echo "No formula-sources.json found"
+            exit 0
+          fi
+
+          UPDATED=0
+
+          # Parse each project from the registry.
+          jq -c '.[]' "$REGISTRY" | while IFS= read -r entry; do
+            PROJECT=$(echo "$entry" | jq -r '.project')
+            REPO=$(echo "$entry" | jq -r '.repo')
+            DESC=$(echo "$entry" | jq -r '.description')
+            HOMEPAGE=$(echo "$entry" | jq -r '.homepage')
+            LICENSE=$(echo "$entry" | jq -r '.license // "MIT"')
+            TEST_FLAG=$(echo "$entry" | jq -r '.test_flag // "--version"')
+
+            echo "::group::Checking $PROJECT ($REPO)"
+
+            # Fetch latest release (public API, no auth required).
+            RELEASE_JSON=$(curl -sf "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || echo "")
+            if [ -z "$RELEASE_JSON" ]; then
+              echo "No releases found for $REPO, skipping"
+              echo "::endgroup::"
+              continue
+            fi
+
+            TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+            # Strip leading 'v' from version.
+            VERSION="${TAG#v}"
+
+            if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+              echo "Could not determine version from tag $TAG, skipping"
+              echo "::endgroup::"
+              continue
+            fi
+
+            echo "Latest release: $VERSION (tag: $TAG)"
+
+            # Check version immutability: does the formula already exist with this version?
+            FORMULA_FILE="Formula/${PROJECT}.rb"
+            if [ -f "$FORMULA_FILE" ]; then
+              CURRENT_VERSION=$(grep -oP '^\s*version\s+"\K[^"]+' "$FORMULA_FILE" 2>/dev/null || echo "")
+              if [ "$CURRENT_VERSION" = "$VERSION" ]; then
+                echo "Formula already at version $VERSION, skipping"
+                echo "::endgroup::"
+                continue
+              fi
+              echo "Updating formula from $CURRENT_VERSION to $VERSION"
+            else
+              echo "Creating new formula for $PROJECT $VERSION"
+            fi
+
+            # Download release assets and compute SHA256.
+            PLATFORMS=("darwin_amd64" "darwin_arm64" "linux_amd64" "linux_arm64")
+            SHAS=()
+            ALL_FOUND=true
+
+            for PLAT in "${PLATFORMS[@]}"; do
+              ASSET_NAME="${PROJECT}_${PLAT}.tar.gz"
+              ASSET_URL=$(echo "$RELEASE_JSON" | jq -r ".assets[] | select(.name == \"${ASSET_NAME}\") | .browser_download_url")
+
+              if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+                echo "Asset $ASSET_NAME not found in release, skipping project"
+                ALL_FOUND=false
+                break
+              fi
+
+              echo "Downloading $ASSET_NAME..."
+              curl -sL -o "/tmp/${ASSET_NAME}" "$ASSET_URL"
+              SHA=$(sha256sum "/tmp/${ASSET_NAME}" | cut -d' ' -f1)
+              SHAS+=("$SHA")
+              echo "  SHA256: $SHA"
+              rm -f "/tmp/${ASSET_NAME}"
+            done
+
+            if [ "$ALL_FOUND" = "false" ]; then
+              echo "::endgroup::"
+              continue
+            fi
+
+            # Convert project name to Ruby class name (snake_case -> CamelCase).
+            CLASS_NAME=$(echo "$PROJECT" | sed -r 's/(^|_)([a-z])/\U\2/g')
+
+            # Generate formula.
+            RELEASE_URL_BASE="https://github.com/${REPO}/releases/download/${TAG}"
+
+            cat > "$FORMULA_FILE" <<RUBY
+          class ${CLASS_NAME} < Formula
+            desc "${DESC}"
+            homepage "${HOMEPAGE}"
+            license "${LICENSE}"
+            version "${VERSION}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${RELEASE_URL_BASE}/${PROJECT}_darwin_arm64.tar.gz"
+                sha256 "${SHAS[1]}"
+              else
+                url "${RELEASE_URL_BASE}/${PROJECT}_darwin_amd64.tar.gz"
+                sha256 "${SHAS[0]}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "${RELEASE_URL_BASE}/${PROJECT}_linux_arm64.tar.gz"
+                sha256 "${SHAS[3]}"
+              else
+                url "${RELEASE_URL_BASE}/${PROJECT}_linux_amd64.tar.gz"
+                sha256 "${SHAS[2]}"
+              end
+            end
+
+            def install
+              bin.install "${PROJECT}"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/${PROJECT} ${TEST_FLAG}")
+            end
+          end
+          RUBY
+
+            # Remove leading whitespace from heredoc.
+            sed -i 's/^          //' "$FORMULA_FILE"
+
+            echo "Generated $FORMULA_FILE"
+            cat "$FORMULA_FILE"
+            UPDATED=1
+
+            # Create branch, commit, and open PR.
+            BRANCH="formula/${PROJECT}-${VERSION}"
+
+            # Check if branch or PR already exists.
+            if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+              echo "Branch $BRANCH already exists, skipping"
+              echo "::endgroup::"
+              continue
+            fi
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git checkout -b "$BRANCH"
+            git add "$FORMULA_FILE"
+            git commit -m "formula: ${PROJECT} ${VERSION}"
+            git push origin "$BRANCH"
+
+            gh pr create \
+              --title "formula: ${PROJECT} ${VERSION}" \
+              --body "Auto-generated formula for **${PROJECT}** version **${VERSION}**.
+
+          Source: [${REPO} ${TAG}](https://github.com/${REPO}/releases/tag/${TAG})
+
+          ## Checklist
+          - [x] SHA256 hashes computed from release assets
+          - [x] Version immutability verified
+          - [ ] \`brew audit\` passes (CI)" \
+              --base main \
+              --head "$BRANCH"
+
+            # Return to main for the next project.
+            git checkout main
+
+            echo "::endgroup::"
+          done
+
+      - name: Auto-merge approved PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Find all open formula PRs created by this workflow.
+          PRS=$(gh pr list --state open --label "" --json number,title,headRefName \
+            --jq '.[] | select(.headRefName | startswith("formula/")) | .number')
+
+          for PR_NUM in $PRS; do
+            echo "Checking PR #${PR_NUM}..."
+
+            # Check if all checks have passed.
+            STATUS=$(gh pr checks "$PR_NUM" --json bucket --jq '[.[] | .bucket] | if all(. == "pass") then "pass" elif any(. == "fail") then "fail" else "pending" end' 2>/dev/null || echo "pending")
+
+            if [ "$STATUS" = "pass" ]; then
+              echo "All checks passed on PR #${PR_NUM}, merging..."
+              gh pr merge "$PR_NUM" --squash --auto --delete-branch
+            elif [ "$STATUS" = "fail" ]; then
+              echo "Checks failed on PR #${PR_NUM}, skipping"
+            else
+              echo "Checks still pending on PR #${PR_NUM}, will merge on next run"
+              # Enable auto-merge so GitHub merges when checks pass.
+              gh pr merge "$PR_NUM" --squash --auto --delete-branch 2>/dev/null || true
+            fi
+          done

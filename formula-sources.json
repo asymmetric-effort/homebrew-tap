@@ -1,0 +1,10 @@
+[
+  {
+    "project": "leakdetector",
+    "repo": "asymmetric-effort/leakdetector",
+    "description": "Secret detection for git repositories",
+    "homepage": "https://leakdetector.asymmetric-effort.com",
+    "license": "MIT",
+    "test_flag": "--version"
+  }
+]
